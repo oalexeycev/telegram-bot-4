@@ -3,7 +3,17 @@ const { Telegraf } = require('telegraf');
 // Токен бота берём из переменной окружения BOT_TOKEN
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Простой echo‑бот: отвечает тем же текстом
+// Команда /start — приветствие и краткая подсказка
+bot.start(async (ctx) => {
+  await ctx.reply(
+    'Привет! Я простой echo-бот.\n' +
+    'Напиши мне любое сообщение — я повторю его.\n\n' +
+    'Команды:\n' +
+    '/start — показать это сообщение ещё раз'
+  );
+});
+
+// Простой echo‑бот: отвечает тем же текстом на любые сообщения
 bot.on('text', async (ctx) => {
   const text = ctx.message.text || '';
   await ctx.reply(`Эхо: ${text}`);
