@@ -87,8 +87,8 @@ bot.command('song', async (ctx) => {
   }
 
   await ctx.reply(
-    'Генерирую песню через Suno API. Обычно это занимает до минуты-двух...\n' +
-    'Если я вдруг не успею дождаться, ты можешь позже написать /song_status — я проверю готовность трека, не запуская новую генерацию.'
+    'Генерирую песню через Suno API. Обычно это занимает немного времени...\n' +
+    'Если я вдруг не успею дождаться внутри одного запроса, ты можешь позже написать /song_status — я проверю готовность трека, не запуская новую генерацию.'
   );
 
   try {
@@ -143,13 +143,13 @@ bot.command('song', async (ctx) => {
 
     // 2. Ожидание готовности трека (простое опросивание статуса)
     let audioUrl = null;
-    // Ждём до ~60 секунд (12 * 5с). Этого обычно достаточно,
+    // Ждём до ~60 секунд (6 * 10с). Этого обычно достаточно,
     // чтобы получить stream URL, но не превышать лимиты Vercel.
-    const maxAttempts = 12;
+    const maxAttempts = 6;
     let waitMsgIndex = 0;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, 10000));
 
       const statusRes = await fetch(
         `https://api.sunoapi.org/api/v1/generate/record-info?taskId=${encodeURIComponent(
@@ -171,11 +171,12 @@ bot.command('song', async (ctx) => {
       }
 
       const status = statusJson.data.status;
-      if (status === 'SUCCESS') {
-        const tracks = statusJson.data.response?.data || [];
-        if (tracks.length > 0 && tracks[0].audio_url) {
-          audioUrl = tracks[0].audio_url;
-        }
+      const tracks = statusJson.data.response?.data || [];
+
+      // Если Suno уже вернул audio_url — считаем, что трек готов,
+      // даже если статус ещё не финальный SUCCESS (например, TEXT_SUCCESS).
+      if (tracks.length > 0 && tracks[0].audio_url) {
+        audioUrl = tracks[0].audio_url;
 
         sunoTasks.set(chatId, {
           taskId,
@@ -198,9 +199,9 @@ bot.command('song', async (ctx) => {
         break;
       }
 
-      // Каждые ~20 секунд (4 * 5с) шлём новое "ожидайте" сообщение,
+      // Каждые ~10 секунд шлём новое "ожидайте" сообщение,
       // пока трек ещё генерируется.
-      if ((attempt + 1) % 4 === 0 && waitMsgIndex < waitMessages.length) {
+      if (waitMsgIndex < waitMessages.length) {
         try {
           await ctx.reply(waitMessages[waitMsgIndex]);
           waitMsgIndex += 1;
@@ -278,10 +279,8 @@ bot.command('song_status', async (ctx) => {
     }
 
     const status = statusJson.data.status;
-
-    if (status === 'PENDING' || status === 'GENERATING') {
-      return ctx.reply('Песня ещё в процессе генерации. Подожди ещё немного ⏳');
-    }
+    const tracks = statusJson.data.response?.data || [];
+    const audioUrl = tracks.length > 0 ? tracks[0].audio_url : null;
 
     if (status === 'FAILED') {
       sunoTasks.set(chatId, {
@@ -293,15 +292,9 @@ bot.command('song_status', async (ctx) => {
       );
     }
 
-    if (status === 'SUCCESS') {
-      const tracks = statusJson.data.response?.data || [];
-      if (!tracks.length || !tracks[0].audio_url) {
-        return ctx.reply(
-          'Suno сообщил об успешной генерации, но не вернул ссылку на трек.'
-        );
-      }
-
-      const audioUrl = tracks[0].audio_url;
+    // Если уже есть audio_url — считаем, что трек готов, даже если статус,
+    // например, TEXT_SUCCESS или другой промежуточный.
+    if (audioUrl) {
       sunoTasks.set(chatId, {
         ...task,
         status: 'SUCCESS',
@@ -313,9 +306,9 @@ bot.command('song_status', async (ctx) => {
       });
     }
 
-    // На всякий случай, если пришёл какой-то другой статус
+    // Иначе считаем, что задача ещё в процессе генерации
     return ctx.reply(
-      `Неожиданный статус задачи от Suno: ${status}. Попробуй ещё раз позже.`
+      `Песня ещё в процессе генерации (статус Suno: ${status}). Подожди ещё немного ⏳`
     );
   } catch (err) {
     console.error('Suno API error (song_status):', err);
