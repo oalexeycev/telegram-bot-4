@@ -8,7 +8,8 @@ bot.start(async (ctx) => {
   await ctx.reply(
     'Привет! Я простой echo-бот.\n' +
     'Напиши мне любое сообщение — я повторю его.\n\n' +
-    'Можешь попробовать кнопки ниже 👇',
+    'Можешь попробовать кнопки ниже 👇\n\n' +
+    'Также есть команда /song — сделаю для тебя короткий трек через Suno.',
     {
       reply_markup: {
         inline_keyboard: [
@@ -42,6 +43,113 @@ bot.action('help', async (ctx) => {
     '• "Показать время" — отправляю текущее время\n' +
     '• "Что ты умеешь?" — рассказываю о себе'
   );
+});
+
+// Команда /song — генерирует музыку через Suno API по текстовому описанию
+bot.command('song', async (ctx) => {
+  const apiKey = process.env.SUNO_API_KEY;
+  if (!apiKey) {
+    return ctx.reply(
+      'Suno API пока не настроен. Добавь переменную окружения SUNO_API_KEY на Vercel.'
+    );
+  }
+
+  // Текст после команды /song считаем промптом
+  const fullText = ctx.message.text || '';
+  const prompt = fullText.replace(/^\/song(@\w+)?\s*/i, '');
+
+  if (!prompt) {
+    return ctx.reply(
+      'Напиши промпт после команды.\n\n' +
+      'Пример:\n' +
+      '/song весёлая песня про кота, который учится программировать'
+    );
+  }
+
+  await ctx.reply(
+    'Генерирую песню через Suno API. Обычно это занимает 30–60 секунд...'
+  );
+
+  try {
+    // 1. Запрос на генерацию музыки
+    const generateRes = await fetch('https://api.sunoapi.org/api/v1/generate', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        prompt,
+        customMode: false,
+        instrumental: false,
+        model: 'V4_5ALL',
+      }),
+    });
+
+    const generateJson = await generateRes.json();
+
+    if (generateJson.code !== 200 || !generateJson.data?.taskId) {
+      console.error('Suno generate error:', generateJson);
+      return ctx.reply('Не удалось запустить генерацию песни. Попробуй ещё раз позже.');
+    }
+
+    const taskId = generateJson.data.taskId;
+
+    // 2. Ожидание готовности трека (простое опросивание статуса)
+    let audioUrl = null;
+    const maxAttempts = 6; // ~6 * 5с = ~30 секунд ожидания
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      const statusRes = await fetch(
+        `https://api.sunoapi.org/api/v1/generate/record-info?taskId=${encodeURIComponent(
+          taskId
+        )}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+          },
+        }
+      );
+
+      const statusJson = await statusRes.json();
+
+      if (statusJson.code !== 200 || !statusJson.data) {
+        console.error('Suno status error:', statusJson);
+        continue;
+      }
+
+      const status = statusJson.data.status;
+      if (status === 'SUCCESS') {
+        const tracks = statusJson.data.response?.data || [];
+        if (tracks.length > 0 && tracks[0].audio_url) {
+          audioUrl = tracks[0].audio_url;
+        }
+        break;
+      }
+
+      if (status === 'FAILED') {
+        console.error('Suno task failed:', statusJson);
+        break;
+      }
+    }
+
+    if (!audioUrl) {
+      return ctx.reply(
+        'Я не успел дождаться готовой песни (таймаут по ожиданию).\n' +
+        'Попробуй ещё раз чуть позже или с другим промптом.'
+      );
+    }
+
+    await ctx.replyWithAudio(audioUrl, {
+      caption: 'Готово! Вот твоя сгенерированная песня 🎵',
+    });
+  } catch (err) {
+    console.error('Suno API error:', err);
+    await ctx.reply('Во время обращения к Suno API произошла ошибка. Попробуй ещё раз позже.');
+  }
 });
 
 // Простой echo‑бот: отвечает тем же текстом на любые сообщения
