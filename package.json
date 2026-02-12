@@ -1,0 +1,13 @@
+{
+  "name": "telegram-bot-4",
+  "version": "1.0.0",
+  "description": "Минимальный Telegram-бот на Vercel (Telegraf + webhook)",
+  "main": "api/webhook.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "node api/webhook.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3"
+  }
+}
