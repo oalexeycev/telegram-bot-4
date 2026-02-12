@@ -1,5 +1,9 @@
 const { Telegraf } = require('telegraf');
 
+// Простое "хранилище" задач Suno в памяти
+// ключ: chatId, значение: { taskId, prompt, status, startedAt, audioUrl? }
+const sunoTasks = new Map();
+
 // Токен бота берём из переменной окружения BOT_TOKEN
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -54,6 +58,22 @@ bot.command('song', async (ctx) => {
     );
   }
 
+  const chatId = String(ctx.chat.id);
+  const existingTask = sunoTasks.get(chatId);
+
+  // Если уже есть незавершённая задача в последние 5 минут — не запускаем новую,
+  // чтобы не плодить одинаковые генерации и не тратить кредиты.
+  if (
+    existingTask &&
+    existingTask.status === 'PENDING' &&
+    Date.now() - existingTask.startedAt < 5 * 60 * 1000
+  ) {
+    return ctx.reply(
+      'У тебя уже генерируется песня, я не запускаю новую, чтобы не тратить кредиты.\n' +
+      'Подожди ещё немного и напиши /song_status — я проверю, готов ли трек.'
+    );
+  }
+
   // Текст после команды /song считаем промптом
   const fullText = ctx.message.text || '';
   const prompt = fullText.replace(/^\/song(@\w+)?\s*/i, '');
@@ -67,7 +87,8 @@ bot.command('song', async (ctx) => {
   }
 
   await ctx.reply(
-    'Генерирую песню через Suno API. Обычно это занимает до минуты...'
+    'Генерирую песню через Suno API. Обычно это занимает до минуты-двух...\n' +
+    'Если я вдруг не успею дождаться, ты можешь позже написать /song_status — я проверю готовность трека, не запуская новую генерацию.'
   );
 
   try {
@@ -113,6 +134,13 @@ bot.command('song', async (ctx) => {
 
     const taskId = generateJson.data.taskId;
 
+    sunoTasks.set(chatId, {
+      taskId,
+      prompt,
+      status: 'PENDING',
+      startedAt: Date.now(),
+    });
+
     // 2. Ожидание готовности трека (простое опросивание статуса)
     let audioUrl = null;
     // Ждём до ~60 секунд (12 * 5с). Этого обычно достаточно,
@@ -148,11 +176,25 @@ bot.command('song', async (ctx) => {
         if (tracks.length > 0 && tracks[0].audio_url) {
           audioUrl = tracks[0].audio_url;
         }
+
+        sunoTasks.set(chatId, {
+          taskId,
+          prompt,
+          status: 'SUCCESS',
+          startedAt: sunoTasks.get(chatId)?.startedAt || Date.now(),
+          audioUrl,
+        });
         break;
       }
 
       if (status === 'FAILED') {
         console.error('Suno task failed:', statusJson);
+        sunoTasks.set(chatId, {
+          taskId,
+          prompt,
+          status: 'FAILED',
+          startedAt: sunoTasks.get(chatId)?.startedAt || Date.now(),
+        });
         break;
       }
 
@@ -171,7 +213,8 @@ bot.command('song', async (ctx) => {
     if (!audioUrl) {
       return ctx.reply(
         'Я не успел дождаться готовой песни (таймаут по ожиданию).\n' +
-        'Попробуй ещё раз чуть позже или с другим промптом.'
+        'Я НЕ запускал новую генерацию, текущая всё ещё крутится на стороне Suno.\n' +
+        'Через 1–2 минуты напиши /song_status — я проверю, готов ли трек.'
       );
     }
 
@@ -181,6 +224,104 @@ bot.command('song', async (ctx) => {
   } catch (err) {
     console.error('Suno API error:', err);
     await ctx.reply('Во время обращения к Suno API произошла ошибка. Попробуй ещё раз позже.');
+  }
+});
+
+// Команда /song_status — проверить статус последней генерации без запуска новой
+bot.command('song_status', async (ctx) => {
+  const apiKey = process.env.SUNO_API_KEY;
+  if (!apiKey) {
+    return ctx.reply(
+      'Suno API пока не настроен. Добавь переменную окружения SUNO_API_KEY на Vercel.'
+    );
+  }
+
+  const chatId = String(ctx.chat.id);
+  const task = sunoTasks.get(chatId);
+
+  if (!task) {
+    return ctx.reply(
+      'Я не нашёл последнюю задачу для генерации песни.\n' +
+      'Сначала запусти /song с описанием, а потом зови /song_status.'
+    );
+  }
+
+  // Если мы уже сохранили готовый audioUrl — просто отправим его
+  if (task.status === 'SUCCESS' && task.audioUrl) {
+    return ctx.replyWithAudio(task.audioUrl, {
+      caption: 'Вот последняя сгенерированная песня 🎵',
+    });
+  }
+
+  await ctx.reply('Проверяю статус генерации песни на Suno...');
+
+  try {
+    const statusRes = await fetch(
+      `https://api.sunoapi.org/api/v1/generate/record-info?taskId=${encodeURIComponent(
+        task.taskId
+      )}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+      }
+    );
+
+    const statusJson = await statusRes.json();
+
+    if (statusJson.code !== 200 || !statusJson.data) {
+      console.error('Suno status error (song_status):', statusJson);
+      return ctx.reply(
+        'Не удалось узнать статус генерации. Попробуй ещё раз чуть позже.'
+      );
+    }
+
+    const status = statusJson.data.status;
+
+    if (status === 'PENDING' || status === 'GENERATING') {
+      return ctx.reply('Песня ещё в процессе генерации. Подожди ещё немного ⏳');
+    }
+
+    if (status === 'FAILED') {
+      sunoTasks.set(chatId, {
+        ...task,
+        status: 'FAILED',
+      });
+      return ctx.reply(
+        'Suno не смог сгенерировать песню для этой задачи. Попробуй запустить /song с другим промптом.'
+      );
+    }
+
+    if (status === 'SUCCESS') {
+      const tracks = statusJson.data.response?.data || [];
+      if (!tracks.length || !tracks[0].audio_url) {
+        return ctx.reply(
+          'Suno сообщил об успешной генерации, но не вернул ссылку на трек.'
+        );
+      }
+
+      const audioUrl = tracks[0].audio_url;
+      sunoTasks.set(chatId, {
+        ...task,
+        status: 'SUCCESS',
+        audioUrl,
+      });
+
+      return ctx.replyWithAudio(audioUrl, {
+        caption: 'Готово! Вот твоя сгенерированная песня 🎵',
+      });
+    }
+
+    // На всякий случай, если пришёл какой-то другой статус
+    return ctx.reply(
+      `Неожиданный статус задачи от Suno: ${status}. Попробуй ещё раз позже.`
+    );
+  } catch (err) {
+    console.error('Suno API error (song_status):', err);
+    return ctx.reply(
+      'Во время запроса статуса в Suno API произошла ошибка. Попробуй ещё раз позже.'
+    );
   }
 });
 
