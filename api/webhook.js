@@ -83,6 +83,8 @@ bot.command('song', async (ctx) => {
         customMode: false,
         instrumental: false,
         model: 'V4_5ALL',
+        // Suno API требует обязательный callBackUrl, даже если мы сами опрашиваем статус
+        callBackUrl: 'https://example.com/callback',
       }),
     });
 
@@ -90,7 +92,10 @@ bot.command('song', async (ctx) => {
 
     if (generateJson.code !== 200 || !generateJson.data?.taskId) {
       console.error('Suno generate error:', generateJson);
-      return ctx.reply('Не удалось запустить генерацию песни. Попробуй ещё раз позже.');
+      const msg = generateJson.msg || 'неизвестная ошибка';
+      return ctx.reply(
+        `Не удалось запустить генерацию песни.\nКод: ${generateJson.code}\nСообщение: ${msg}`
+      );
     }
 
     const taskId = generateJson.data.taskId;
